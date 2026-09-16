@@ -1,0 +1,8 @@
+requests
+cloudscraper
+playwright
+PyMuPDF
+pdfplumber
+pypdf
+openpyxl
+python-docx

@@ -1,0 +1,12 @@
+# Secrets and local state
+.env
+pipeline/out/
+pipeline/tessdata/
+.pxsol-playwright-profile/
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
