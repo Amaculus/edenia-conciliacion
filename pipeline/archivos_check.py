@@ -321,6 +321,54 @@ def parse_files_html(html: str) -> tuple[str, int, list[str]]:
     return "incierto", 0, []
 
 
+PAGOS_URL = "https://pms.pxsol.com/bookings/pagos_pms.php?CID={cid}&time={t}"
+
+
+def _amt(s: str):
+    m = re.search(r"([A-Z]{3})\s*\$?\s*([\d.,]+)", s or "")
+    if not m:
+        return None, None
+    try:
+        return m.group(1), float(m.group(2).replace(",", ""))
+    except ValueError:
+        return m.group(1), None
+
+
+def fetch_pagos(session: requests.Session, cid: str) -> list[dict]:
+    """Parse the payment ledger (pagos_pms.php): one dict per registered payment."""
+    try:
+        html = session.get(PAGOS_URL.format(cid=cid, t=int(time.time() * 1000)), timeout=30).text
+    except Exception:  # noqa: BLE001
+        return []
+    rows = []
+    for tr in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S):
+        cells = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", c)).strip()
+                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", tr, re.S)]
+        cells = [c for c in cells if c]
+        if len(cells) < 6 or cells[0] == "Fecha":
+            continue
+        cur, inc = _amt(cells[4]); _, egr = _amt(cells[5])
+        fx = re.search(r"=\s*USD\s*([\d.,]+)", cells[4])
+        rows.append({"cid": cid, "fecha": cells[0], "metodo": cells[1], "concepto": cells[2][:60],
+                     "moneda": cur, "ingreso": inc, "egreso": egr,
+                     "usd": float(fx.group(1)) if fx else None, "usuario": cells[6] if len(cells) > 6 else ""})
+    return rows
+
+
+def pagos_summary(rows: list[dict]) -> dict:
+    """Collapse the ledger into per-reservation fields."""
+    if not rows:
+        return {"pagos_n": 0, "pagos_metodos": "", "pagos_cobrado": "", "pagos_ultimo": ""}
+    net = {}
+    for r in rows:
+        cur = r.get("moneda") or "?"
+        net[cur] = net.get(cur, 0) + (r.get("ingreso") or 0) - (r.get("egreso") or 0)
+    metodos = " + ".join(dict.fromkeys(re.sub(r"\s*\(.*?\)", "", r["metodo"]).strip() for r in rows if r.get("metodo")))
+    cobrado = ", ".join(f"{c} {a:,.2f}" for c, a in net.items() if abs(a) > 0.005)
+    ultimo = max((r["fecha"] for r in rows), default="")
+    return {"pagos_n": len(rows), "pagos_metodos": metodos, "pagos_cobrado": cobrado, "pagos_ultimo": ultimo}
+
+
 def fetch_archivos_http(session: requests.Session, cid: str, attempts: int = 3) -> tuple[str, int, list[str]]:
     last = ("http-error: no attempt", -1, [])
     for _ in range(attempts):
@@ -480,8 +528,9 @@ def build_worklist(api_key: str, days: list[str], skip: set[str] | None = None) 
 
 
 FIELDNAMES = ["checkout", "cid", "guest", "channel", "api_verdict",
-              "total", "paid", "unpaid", "currency", "archivos",
-              "n_archivos", "archivo_names", "flag", "url"]
+              "total", "paid", "unpaid", "currency",
+              "pagos_n", "pagos_metodos", "pagos_cobrado", "pagos_ultimo",
+              "archivos", "n_archivos", "archivo_names", "flag", "url"]
 GOOD_STATES = {"vacio", "con_archivos"}  # a reservation is "done" only if its tab read cleanly
 
 
@@ -535,6 +584,8 @@ def make_row(task: dict, state: str, n_files: int, names: list[str]) -> dict:
         "channel": task["channel"], "api_verdict": api_verdict,
         "total": task.get("total"), "paid": task.get("paid"),
         "unpaid": task.get("unpaid"), "currency": task.get("currency"),
+        "pagos_n": task.get("pagos_n"), "pagos_metodos": task.get("pagos_metodos"),
+        "pagos_cobrado": task.get("pagos_cobrado"), "pagos_ultimo": task.get("pagos_ultimo"),
         "archivos": state, "n_archivos": n_files, "archivo_names": " | ".join(names),
         "flag": flag, "url": PMS_BOOKING.format(cid=task["cid"]),
     }
@@ -574,21 +625,34 @@ def cmd_check(args) -> int:
 
         counter = {"done": base}
         lock = threading.Lock()
+        pagos_all: list[dict] = []
 
         def worker(task: dict) -> None:
             try:
                 state, n_files, names = fetch_archivos_http(sess, task["cid"])
             except SessionExpired:
                 state, n_files, names = "sesion-expirada", -1, []
+            pagos = fetch_pagos(sess, task["cid"])       # real payment ledger
+            task.update(pagos_summary(pagos))
             row = make_row(task, state, n_files, names)
             ckpt.append(row)
             with lock:
+                pagos_all.extend(pagos)
                 counter["done"] += 1
                 log(f"[{counter['done']}/{total}] {task['cid']} {task['guest'][:24]:24} "
-                    f"api={task['api_verdict']:16} archivos={state:14} -> {row['flag']}")
+                    f"api={task['api_verdict']:16} archivos={state:14} pagos={task.get('pagos_n',0)} -> {row['flag']}")
 
         with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
             list(pool.map(worker, pending))
+
+        # Detailed payment ledger (one row per payment) for the cash view.
+        if pagos_all:
+            pcsv = OUT_DIR / "pagos.csv"
+            with pcsv.open("w", newline="", encoding="utf-8") as fh:
+                w = csv.DictWriter(fh, fieldnames=["cid", "fecha", "metodo", "concepto", "moneda",
+                                                   "ingreso", "egreso", "usd", "usuario"])
+                w.writeheader(); w.writerows(pagos_all)
+            log(f"payment ledger: {len(pagos_all)} pagos -> {pcsv}")
 
     rows = ckpt.finalize()
     flagged = [r for r in rows if r["flag"] != "OK"]

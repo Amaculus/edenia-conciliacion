@@ -76,10 +76,14 @@ def main() -> int:
             total_num = float(a.get("total"))
         except (TypeError, ValueError):
             total_num = None
+        pago = a.get("pagos_cobrado", "") or ""
+        if pago and a.get("pagos_metodos"):
+            pago = f"{pago} · {a['pagos_metodos']}"
         rec = {"cid": cid, "guest": a.get("guest", ""), "channel": ch,
                "checkout": a.get("checkout", ""), "dias": dias, "api": api, "match_flag": mflag,
                "receipt": money((c or {}).get("receipt_amount", ""), (c or {}).get("receipt_currency", "")),
                "expected": expected, "_total": total_num, "_currency": (a.get("currency") or "").strip(),
+               "pago": pago,
                "detail": (c or {}).get("match_detail", ""), "url": PMS.format(cid=cid)}
         # A real lote = reservations that literally share the same receipt file (same hash).
         # Bulk members live ONLY in the lote section, never in the per-reservation buckets.
@@ -120,8 +124,9 @@ def main() -> int:
     def line(r, ind="  "):
         extra = f"  [{r['detail']}]" if r["detail"] else ""
         dias = f"{r['dias']}d" if r["dias"] >= 0 else "?"
+        pago = f" pago={r['pago']}" if r.get("pago") else ""
         out(f"{ind}{r['checkout']} (+{dias}) {r['cid']} {r['guest'][:24]:24} [{r['channel']}] "
-            f"esperado={r['expected'] or '-'} recibo={r['receipt'] or '-'}{extra}")
+            f"esperado={r['expected'] or '-'} recibo={r['receipt'] or '-'}{pago}{extra}")
         out(f"{ind}     {r['url']}")
 
     for key, title in order:
@@ -262,7 +267,8 @@ def render_html(buckets, shared, total, order, artifact: bool = False) -> str:
         def _table(rs):
             t = ["<div class=tw><table><tr><th>Check-out</th><th class=amt>Días</th><th>Reserva</th>"
                  "<th>Huésped</th><th>Canal</th>"
-                 "<th class=amt>Esperado</th><th class=amt>Recibo</th><th>Detalle</th></tr>"]
+                 "<th class=amt>Esperado</th><th class=amt>Recibo</th><th>Pago (sistema)</th>"
+                 "<th>Detalle</th></tr>"]
             for r in sorted(rs, key=lambda x: x["dias"], reverse=True):
                 dias = f"+{r['dias']}" if r["dias"] >= 0 else "?"
                 t.append(f"<tr><td>{_esc(r['checkout'])}</td><td class=amt>{dias}</td>"
@@ -270,6 +276,7 @@ def render_html(buckets, shared, total, order, artifact: bool = False) -> str:
                          f"<td>{_esc(r['guest'][:30])}</td><td>{_esc(r['channel'])}</td>"
                          f"<td class=amt>{_esc(r['expected'] or '—')}</td>"
                          f"<td class=amt>{_esc(r['receipt'] or '—')}</td>"
+                         f"<td class=det>{_esc(r.get('pago') or '—')}</td>"
                          f"<td class=det>{_esc(r['detail'])}</td></tr>")
             t.append("</table></div>")
             return "".join(t)

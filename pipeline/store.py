@@ -24,11 +24,19 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS reservations (
     run_id TEXT, cid TEXT, checkout TEXT, guest TEXT, channel TEXT, api_verdict TEXT,
     total REAL, paid REAL, unpaid REAL, currency TEXT,
+    pagos_n INTEGER, pagos_metodos TEXT, pagos_cobrado TEXT, pagos_ultimo TEXT,
     has_receipt INTEGER, receipt_amount REAL, receipt_currency TEXT, receipt_date TEXT,
     expected TEXT, fx_date TEXT, fx_rate REAL, match_flag TEXT, match_detail TEXT,
     bulk_size INTEGER, bulk_cids TEXT, receipt_hash TEXT,
     PRIMARY KEY (run_id, cid)
 );
+CREATE TABLE IF NOT EXISTS pagos (
+    run_id TEXT, cid TEXT, fecha TEXT, metodo TEXT, concepto TEXT, moneda TEXT,
+    ingreso REAL, egreso REAL, usd REAL, usuario TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_pagos_cid ON pagos(cid);
+CREATE VIEW IF NOT EXISTS v_latest_pagos AS
+    SELECT p.* FROM pagos p JOIN v_last_run l ON p.run_id = l.run_id;
 CREATE TABLE IF NOT EXISTS files (
     run_id TEXT, cid TEXT, file TEXT, kind TEXT, is_receipt INTEGER, signal TEXT,
     amount REAL, currency TEXT, date TEXT, how TEXT, hash TEXT
@@ -71,6 +79,8 @@ def main() -> int:
     comp = {r["cid"]: r for r in csv.DictReader(open(args.comprobantes, encoding="utf-8"))}
     files = list(csv.DictReader(open(args.comprobantes.replace(".csv", "_files.csv"), encoding="utf-8"))) \
         if Path(args.comprobantes.replace(".csv", "_files.csv")).exists() else []
+    pagos_path = Path(args.archivos).parent / "pagos.csv"
+    pagos = list(csv.DictReader(open(pagos_path, encoding="utf-8"))) if pagos_path.exists() else []
 
     run_id = dt.datetime.now().strftime("%Y%m%dT%H%M%S")
     ts = dt.datetime.now().isoformat(timespec="seconds")
@@ -83,9 +93,10 @@ def main() -> int:
     for cid, a in arch.items():
         c = comp.get(cid, {})
         con.execute(
-            "INSERT OR REPLACE INTO reservations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO reservations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run_id, cid, a.get("checkout"), a.get("guest"), a.get("channel"), a.get("api_verdict"),
              _num(a.get("total")), _num(a.get("paid")), _num(a.get("unpaid")), a.get("currency"),
+             _int(a.get("pagos_n")), a.get("pagos_metodos"), a.get("pagos_cobrado"), a.get("pagos_ultimo"),
              1 if c.get("has_receipt") == "True" else 0, _num(c.get("receipt_amount")),
              c.get("receipt_currency"), c.get("receipt_date"), c.get("expected"),
              c.get("fx_date"), _num(c.get("fx_rate")), c.get("match_flag"), c.get("match_detail"),
@@ -96,6 +107,10 @@ def main() -> int:
             (run_id, f.get("cid"), f.get("file"), f.get("kind"),
              1 if f.get("is_receipt") == "True" else 0, f.get("signal"), _num(f.get("amount")),
              f.get("currency"), f.get("date"), f.get("how"), f.get("hash")))
+    for p in pagos:
+        con.execute("INSERT INTO pagos VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (run_id, p.get("cid"), p.get("fecha"), p.get("metodo"), p.get("concepto"), p.get("moneda"),
+             _num(p.get("ingreso")), _num(p.get("egreso")), _num(p.get("usd")), p.get("usuario")))
     con.commit()
 
     n_res = con.execute("SELECT COUNT(*) FROM reservations WHERE run_id=?", (run_id,)).fetchone()[0]
