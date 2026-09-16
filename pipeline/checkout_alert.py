@@ -234,7 +234,9 @@ def stay_nights(b: dict, day: dt.date) -> str:
         return str(b.get("nights") or "?")
 
 
-def build_message(day: dt.date, bookings: list[dict], api_key: str, hotel_label: str) -> str:
+def build_message(day: dt.date, bookings: list[dict], api_key: str, hotel_label: str,
+                  sess=None, bearer=None) -> str:
+    import archivos_check as ac  # lazy: avoids the circular import at module load
     active = [b for b in bookings if int(b.get("status") or 0) != 1]
     cancelled = len(bookings) - len(active)
     day_txt = day.strftime("%d/%m")
@@ -268,9 +270,31 @@ def build_message(day: dt.date, bookings: list[dict], api_key: str, hotel_label:
             body.append(guest.title() if guest.isupper() else guest)
             body.append(f"{nights} noche{'' if nights == '1' else 's'}, {checkin} al {day_txt}")
             body.append(channel_text(b))
-            body.append(f"Esperado: {booking_expected(b)}")
+            # Esperado: total autoritativo del summary si hay bearer; si no, el de rooms.
+            esperado = booking_expected(b)
+            if bearer:
+                try:
+                    s = ac.fetch_summary(bearer, bid)
+                    if s.get("total") is not None:
+                        esperado = f"{s.get('currency') or ''} {s['total']:,.2f}".strip()
+                except Exception:  # noqa: BLE001
+                    pass
+            body.append(f"Esperado: {esperado}")
             body.append(f"Estado: *{verdict(vouchers, paid, unpaid)}*")
             body.extend(lines)
+            # Pago real (libro de pagos) y comprobante subido (pestaña Archivos).
+            if sess is not None:
+                try:
+                    ps = ac.pagos_summary(ac.fetch_pagos(sess, bid))
+                    if ps.get("pagos_n"):
+                        body.append(f"Pago: {ps['pagos_cobrado']} ({ps['pagos_metodos']})")
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    state, nfiles, _ = ac.fetch_archivos_http(sess, bid)
+                    body.append("Comprobante: " + (f"Si ({nfiles})" if state == "con_archivos" else "No"))
+                except Exception:  # noqa: BLE001
+                    pass
             body.append(PMS_LINK.format(booking_id=bid))
             body.append("")
     foot = []
@@ -301,6 +325,11 @@ def main() -> int:
     ap.add_argument("--bridge-url", default=os.environ.get("WA_BRIDGE_URL", "http://127.0.0.1:8765"))
     args = ap.parse_args()
 
+    try:
+        import archivos_check as ac
+        ac._load_dotenv()  # load ../.env (PXSOL_API_KEY, web login, etc.)
+    except Exception:  # noqa: BLE001
+        pass
     api_key = os.environ.get("PXSOL_API_KEY", "").strip()
     if not api_key:
         log("PXSOL_API_KEY is not set")
@@ -312,7 +341,19 @@ def main() -> int:
     log(f"fetch checkouts for {day}")
     bookings = fetch_checkouts(api_key, day.isoformat())
     log(f"{len(bookings)} bookings (all statuses)")
-    message = build_message(day, bookings, api_key, hotel_label)
+    # Enrich with the real payment ledger + uploaded-receipt status (best effort).
+    sess = bearer = None
+    active = [b for b in bookings if int(b.get("status") or 0) != 1]
+    if active:
+        try:
+            import archivos_check as ac
+            first = str(active[0].get("booking_id"))
+            sess = ac.ensure_http_session(ac.OUT_DIR / "state.json", first)
+            bearer = ac.capture_bearer(ac.OUT_DIR / "state.json", first)
+        except Exception as exc:  # noqa: BLE001
+            log(f"enrichment session unavailable ({exc}); sending base message")
+            sess = bearer = None
+    message = build_message(day, bookings, api_key, hotel_label, sess=sess, bearer=bearer)
     print("-" * 60)
     print(message)
     print("-" * 60)
