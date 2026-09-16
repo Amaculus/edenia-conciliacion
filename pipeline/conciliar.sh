@@ -8,6 +8,7 @@
 # Uso: bash conciliar.sh [DIAS] [--no-ai]
 #   DIAS  ventana de check-outs a revisar (default 14; usar más para el backfill inicial).
 #   --no-ai  no usar OpenAI para imágenes ilegibles.
+#   WA_SEND=1  además manda el resumen por WhatsApp (wa-bridge). ARTIFACT_URL para el link.
 set -euo pipefail
 cd "$(dirname "$0")"
 DAYS="${1:-14}"
@@ -27,8 +28,14 @@ python -u read_comprobantes.py --from "$ARCH" $AI
 
 echo "[3/4] reporte de hallazgos"
 python -u report.py --archivos "$ARCH" --comprobantes out/comprobantes.csv \
-    --out out/hallazgos.txt --html out/hallazgos.html --artifact-html out/hallazgos_artifact.html
+    --out out/hallazgos.txt --html out/hallazgos.html --artifact-html out/hallazgos_artifact.html \
+    --json out/hallazgos.json --link "${ARTIFACT_URL:-}"
 
 echo "[4/4] guardando en SQLite"
 python -u store.py --archivos "$ARCH" --comprobantes out/comprobantes.csv --db out/edenia.db --days "$DAYS"
+
+if [ "${WA_SEND:-0}" = "1" ]; then
+  echo "[wa] enviando resumen por WhatsApp"
+  python -u send_conciliacion_wa.py --json out/hallazgos.json
+fi
 echo "Listo. Reporte: pipeline/out/hallazgos.html  ·  Base: pipeline/out/edenia.db"

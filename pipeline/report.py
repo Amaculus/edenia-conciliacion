@@ -46,6 +46,8 @@ def main() -> int:
     ap.add_argument("--out")
     ap.add_argument("--html")
     ap.add_argument("--artifact-html", help="body-only HTML for a Claude Artifact (no doctype/head wrappers)")
+    ap.add_argument("--json", dest="json_out", help="structured summary (counts, saldo, priority, cash) for the WhatsApp sender")
+    ap.add_argument("--link", default="", help="report/artifact URL to embed in the JSON summary")
     args = ap.parse_args()
 
     import datetime
@@ -174,6 +176,55 @@ def main() -> int:
     if args.artifact_html:
         Path(args.artifact_html).write_text(render_html(buckets, shared, total, order, artifact=True, bulk_counts=bulk_counts), encoding="utf-8")
         print(f"Artifact HTML: {args.artifact_html}")
+    if args.json_out:
+        import json
+        # Saldo pendiente por moneda (del summary, autoritativo).
+        saldo = {}
+        for a in arch.values():
+            try:
+                u = float(a.get("unpaid"))
+            except (TypeError, ValueError):
+                continue
+            cur = (a.get("currency") or "?").strip() or "?"
+            if u:
+                saldo[cur] = saldo.get(cur, 0) + u
+        # Caja por método (del libro de pagos), por moneda.
+        cash = {}
+        ppath = Path(args.archivos).parent / "pagos.csv"
+        if ppath.exists():
+            for p in csv.DictReader(open(ppath, encoding="utf-8")):
+                try:
+                    net = float(p.get("ingreso") or 0) - float(p.get("egreso") or 0)
+                except (TypeError, ValueError):
+                    net = 0
+                m = (p.get("metodo") or "?").split("(")[0].strip()
+                cur = (p.get("moneda") or "?")
+                cash.setdefault(cur, {}).setdefault(m, 0)
+                cash[cur][m] += net
+
+        def top(key, n=8):
+            return [{"cid": r["cid"], "guest": r["guest"], "channel": r["channel"],
+                     "dias": r["dias"], "esperado": r["expected"], "recibo": r["receipt"],
+                     "pago": r.get("pago", ""), "detalle": r["detail"], "url": r["url"]}
+                    for r in sorted(buckets[key], key=lambda x: x["dias"], reverse=True)[:n]]
+        summary = {
+            "generado": datetime.datetime.now().isoformat(timespec="minutes"),
+            "total_checkouts": total, "link": args.link,
+            "counts": {k: cnt(k) for k, _ in order},
+            "lotes": {"total": len(shared),
+                      "a_revisar": sum(1 for v in shared.values() if v[0].get("match_flag") != "OK-BULK")},
+            "saldo_pendiente": {c: round(a, 2) for c, a in saldo.items()},
+            "caja_por_metodo": {c: {m: round(v, 2) for m, v in sorted(d.items(), key=lambda x: -x[1])}
+                                for c, d in cash.items()},
+            "prioridad": {"cobro_no_registrado": top("cobro_no_registrado"),
+                          "chase_directo_agencia": top("chase_directo_agencia"),
+                          "monto_no_coincide": top("monto_no_coincide")},
+            "lotes_revisar": [{"hash": h, "recibo": v[0]["receipt"], "esperado_suma": lote_suma(v),
+                               "n": len(v), "cids": [r["cid"] for r in v]}
+                              for h, v in shared.items() if v[0].get("match_flag") != "OK-BULK"],
+        }
+        Path(args.json_out).write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"JSON: {args.json_out}")
     return 0
 
 
