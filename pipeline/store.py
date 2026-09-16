@@ -97,27 +97,38 @@ def main() -> int:
     con.executescript(SCHEMA)
     con.execute("INSERT OR REPLACE INTO runs VALUES (?,?,?,?)", (run_id, ts, args.days, len(arch)))
 
+    def insert(table, row):  # column-named insert = order-independent, migration-safe
+        cols = ",".join(row.keys())
+        con.execute(f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({','.join('?'*len(row))})",
+                    tuple(row.values()))
+
     for cid, a in arch.items():
         c = comp.get(cid, {})
-        con.execute(
-            "INSERT OR REPLACE INTO reservations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, cid, a.get("checkout"), a.get("guest"), a.get("channel"), a.get("api_verdict"),
-             _num(a.get("total")), _num(a.get("paid")), _num(a.get("unpaid")), a.get("currency"),
-             _int(a.get("pagos_n")), a.get("pagos_metodos"), a.get("pagos_cobrado"), a.get("pagos_ultimo"),
-             1 if c.get("has_receipt") == "True" else 0, _num(c.get("receipt_amount")),
-             c.get("receipt_currency"), c.get("receipt_date"), c.get("expected"),
-             c.get("fx_date"), _num(c.get("fx_rate")), c.get("match_flag"), c.get("match_detail"),
-             _int(c.get("bulk_size")), c.get("bulk_cids"), c.get("receipt_hash")))
+        insert("reservations", {
+            "run_id": run_id, "cid": cid, "checkout": a.get("checkout"), "guest": a.get("guest"),
+            "channel": a.get("channel"), "api_verdict": a.get("api_verdict"),
+            "total": _num(a.get("total")), "paid": _num(a.get("paid")), "unpaid": _num(a.get("unpaid")),
+            "currency": a.get("currency"), "pagos_n": _int(a.get("pagos_n")),
+            "pagos_metodos": a.get("pagos_metodos"), "pagos_cobrado": a.get("pagos_cobrado"),
+            "pagos_ultimo": a.get("pagos_ultimo"),
+            "has_receipt": 1 if c.get("has_receipt") == "True" else 0,
+            "receipt_amount": _num(c.get("receipt_amount")), "receipt_currency": c.get("receipt_currency"),
+            "receipt_date": c.get("receipt_date"), "expected": c.get("expected"),
+            "fx_date": c.get("fx_date"), "fx_rate": _num(c.get("fx_rate")),
+            "match_flag": c.get("match_flag"), "match_detail": c.get("match_detail"),
+            "bulk_size": _int(c.get("bulk_size")), "bulk_cids": c.get("bulk_cids"),
+            "receipt_hash": c.get("receipt_hash")})
     for f in files:
-        con.execute(
-            "INSERT INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (run_id, f.get("cid"), f.get("file"), f.get("kind"),
-             1 if f.get("is_receipt") == "True" else 0, f.get("signal"), _num(f.get("amount")),
-             f.get("currency"), f.get("date"), f.get("how"), f.get("hash")))
+        insert("files", {
+            "run_id": run_id, "cid": f.get("cid"), "file": f.get("file"), "kind": f.get("kind"),
+            "is_receipt": 1 if f.get("is_receipt") == "True" else 0, "signal": f.get("signal"),
+            "amount": _num(f.get("amount")), "currency": f.get("currency"), "date": f.get("date"),
+            "how": f.get("how"), "hash": f.get("hash")})
     for p in pagos:
-        con.execute("INSERT INTO pagos VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (run_id, p.get("cid"), p.get("fecha"), p.get("metodo"), p.get("concepto"), p.get("moneda"),
-             _num(p.get("ingreso")), _num(p.get("egreso")), _num(p.get("usd")), p.get("usuario")))
+        insert("pagos", {
+            "run_id": run_id, "cid": p.get("cid"), "fecha": p.get("fecha"), "metodo": p.get("metodo"),
+            "concepto": p.get("concepto"), "moneda": p.get("moneda"), "ingreso": _num(p.get("ingreso")),
+            "egreso": _num(p.get("egreso")), "usd": _num(p.get("usd")), "usuario": p.get("usuario")})
     con.commit()
 
     n_res = con.execute("SELECT COUNT(*) FROM reservations WHERE run_id=?", (run_id,)).fetchone()[0]
