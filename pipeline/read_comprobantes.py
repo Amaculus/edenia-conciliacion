@@ -413,34 +413,52 @@ def _norm_date(s: str | None) -> str | None:
     return None
 
 
-def veracidad(receipt_amount, expected: dict[str, float], rate: float | None, tol: float = 0.20) -> tuple[str, str]:
-    """Compare a receipt amount to the expected reservation amount (FX-aware, currency-agnostic)."""
+def veracidad(receipt_amount, expected: dict[str, float], rate: float | None,
+              rate_src: str = "BCRA", tol: float = 0.20) -> tuple[str, str]:
+    """Compare a receipt amount to the expected reservation amount (FX-aware, currency-agnostic).
+    `rate_src` = which USD->ARS was used ('hotel' = the rate the hotel actually applied, from
+    the payment ledger; 'BCRA' = the official per-day estimate)."""
     if not expected:
         return "SIN-ESPERADO", ""
     if not rate:
         return "SIN-TC", ", ".join(f"{c} {a:,.2f}" for c, a in expected.items())
-    # Sum all currencies to USD (a group may mix USD and ARS bookings).
     exp_usd = expected.get("USD", 0) + expected.get("ARS", 0) / rate
     for c, a in expected.items():
         if c not in ("USD", "ARS"):
-            exp_usd += a  # unknown currency: treat as USD-ish rather than drop
+            exp_usd += a
     exp_txt = ", ".join(f"{c} {a:,.2f}" for c, a in expected.items())
+    tc = f"TC {rate_src} {rate:,.0f}"
     if not exp_usd:
         return "SIN-ESPERADO", exp_txt
     if receipt_amount in (None, ""):
         return "MONTO-ILEGIBLE", f"esperado {exp_txt}"
     amt = float(receipt_amount)
-    # Try the receipt as USD and as ARS; accept if either lands within tolerance.
     cand = {"USD": amt, "ARS->USD": amt / rate}
     best_lbl, best_ratio = None, None
     for lbl, usd in cand.items():
         ratio = usd / exp_usd if exp_usd else 0
         if best_ratio is None or abs(ratio - 1) < abs(best_ratio - 1):
             best_lbl, best_ratio = lbl, ratio
-    detail = f"esperado {exp_txt} | recibo {amt:,.2f} ({best_lbl}) ratio {best_ratio:.2f}"
+    detail = f"esperado {exp_txt} | recibo {amt:,.2f} ({best_lbl}, {tc}) ratio {best_ratio:.2f}"
     if abs(best_ratio - 1) <= tol:
         return "OK-MONTO", detail
     return "REVISAR-MONTO", detail
+
+
+def hotel_rates_from_pagos(pagos_csv: Path) -> dict[str, float]:
+    """cid -> USD->ARS rate the hotel actually applied, derived from the payment ledger
+    (rows carrying 'ARS X = USD Y'). Averages if a reservation has several."""
+    if not pagos_csv.exists():
+        return {}
+    acc: dict[str, list] = {}
+    for p in csv.DictReader(open(pagos_csv, encoding="utf-8")):
+        try:
+            ars = float(p.get("ingreso")); usd = float(p.get("usd"))
+        except (TypeError, ValueError):
+            continue
+        if p.get("moneda") == "ARS" and ars > 0 and usd > 0:
+            acc.setdefault(p["cid"], []).append(ars / usd)
+    return {cid: sum(v) / len(v) for cid, v in acc.items()}
 
 
 # ---------------------------------------------------------------- driver
@@ -480,6 +498,9 @@ def main() -> int:
     expected_map = build_expected(targets, api_key) if api_key else {}
     days_present = sorted({t.get("checkout")[:10] for t in targets if t.get("checkout")})
     rates = RateProvider(days_present[0], days_present[-1]) if days_present else RateProvider("", "")
+    # Real FX the hotel applied (from the payment ledger); BCRA is only the fallback.
+    hotel_rate = hotel_rates_from_pagos(OUT / "pagos.csv")
+    log(f"hotel FX from ledger for {len(hotel_rate)} reservations; rest use BCRA")
 
     sess = ac.ensure_http_session(STATE, targets[0]["cid"] if targets else None)
     file_rows = []
@@ -546,8 +567,11 @@ def main() -> int:
         own_expected = expected_map.get(cid, {})
         r_amount = best["amount"] if best else None
         fx_day = (_norm_date(best.get("date")) if best else None) or (t.get("checkout") or "")[:10]
-        rate = rates.get(fx_day)
         group = sorted(hash_to_cids.get(best["hash"], {cid})) if best else [cid]
+        # Prefer the hotel's real FX (from any member's ledger); fall back to BCRA per-day.
+        hr = next((hotel_rate[g] for g in group if g in hotel_rate), None)
+        rate = hr or rates.get(fx_day)
+        rate_src = "hotel" if hr else "BCRA"
         if len(group) > 1:  # bulk: expected is the sum over the group
             expected = {}
             for gc in group:
@@ -558,7 +582,7 @@ def main() -> int:
         if not c["receipts"]:
             match_flag, match_detail = "SIN-COMPROBANTE", ""
         else:
-            match_flag, match_detail = veracidad(r_amount, expected, rate)
+            match_flag, match_detail = veracidad(r_amount, expected, rate, rate_src)
             if len(group) > 1:
                 match_flag = "OK-BULK" if match_flag == "OK-MONTO" else match_flag
                 match_detail = f"bulk x{len(group)} | " + match_detail
