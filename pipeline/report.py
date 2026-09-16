@@ -68,6 +68,9 @@ def main() -> int:
         ("cobro_no_registrado", "chase_directo_agencia", "monto_no_coincide",
          "comprobante_ilegible", "chase_ota", "cobrado_sin_respaldo", "conciliado")}
     bulk: dict[str, list] = {}
+    # Lote members are shown only in the lote section, but they still COUNT toward a
+    # bucket: a covered lote (OK-BULK) is conciliado, an uncovered one is to review.
+    bulk_counts: dict[str, int] = {}
 
     for cid, a in arch.items():
         api = a.get("api_verdict", "")
@@ -96,6 +99,8 @@ def main() -> int:
         # Bulk members live ONLY in the lote section, never in the per-reservation buckets.
         if c and c.get("bulk_size") not in ("", "1", None) and c.get("receipt_hash"):
             bulk.setdefault(c["receipt_hash"], []).append(rec)
+            key = "conciliado" if mflag == "OK-BULK" else "monto_no_coincide"
+            bulk_counts[key] = bulk_counts.get(key, 0) + 1
             continue
 
         collected = api == COLLECTED
@@ -136,11 +141,16 @@ def main() -> int:
             f"esperado={r['expected'] or '-'} recibo={r['receipt'] or '-'}{pago}{extra}")
         out(f"{ind}     {r['url']}")
 
+    def cnt(k):  # bucket total = its own rows + lote members that belong to it
+        return len(buckets[k]) + bulk_counts.get(k, 0)
+
     for key, title in order:
         rows = buckets[key]
-        out(f"\n{title}: {len(rows)}")
+        out(f"\n{title}: {cnt(key)}")
         for r in sorted(rows, key=lambda x: x["dias"], reverse=True):
             line(r)
+        if bulk_counts.get(key):
+            out(f"  (+{bulk_counts[key]} en transferencias en lote — ver sección Lotes)")
 
     shared = {h: v for h, v in bulk.items() if len({r['cid'] for r in v}) > 1}
     if shared:
@@ -159,10 +169,10 @@ def main() -> int:
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")
     if args.html:
-        Path(args.html).write_text(render_html(buckets, shared, total, order), encoding="utf-8")
+        Path(args.html).write_text(render_html(buckets, shared, total, order, bulk_counts=bulk_counts), encoding="utf-8")
         print(f"HTML: {args.html}")
     if args.artifact_html:
-        Path(args.artifact_html).write_text(render_html(buckets, shared, total, order, artifact=True), encoding="utf-8")
+        Path(args.artifact_html).write_text(render_html(buckets, shared, total, order, artifact=True, bulk_counts=bulk_counts), encoding="utf-8")
         print(f"Artifact HTML: {args.artifact_html}")
     return 0
 
@@ -185,7 +195,7 @@ PRIORITY = {"cobro_no_registrado": "hi", "chase_directo_agencia": "hi",
             "chase_ota": "low", "cobrado_sin_respaldo": "low", "conciliado": "ok"}
 
 
-def render_html(buckets, shared, total, order, artifact: bool = False) -> str:
+def render_html(buckets, shared, total, order, artifact: bool = False, bulk_counts=None) -> str:
     import datetime
     font = ('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
             '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
@@ -259,17 +269,23 @@ def render_html(buckets, shared, total, order, artifact: bool = False) -> str:
               "monto_no_coincide": "Monto no coincide", "comprobante_ilegible": "Ilegible",
               "chase_ota": "Sin cobrar (OTA)", "cobrado_sin_respaldo": "Cobrado sin respaldo",
               "conciliado": "Conciliado"}
+    bc = bulk_counts or {}
+    def cnt(k):
+        return len(buckets[k]) + bc.get(k, 0)
     for key, _ in order:
         pr = PRIORITY[key]
         cls = f"card {pr}" if pr in ("hi", "mid", "ok") else "card"
-        h.append(f"<a class='{cls}' href='#sec-{key}'><div class=n>{len(buckets[key])}</div>"
+        h.append(f"<a class='{cls}' href='#sec-{key}'><div class=n>{cnt(key)}</div>"
                  f"<div class=l>{labels[key]}</div></a>")
     h.append("</div>")
     for key, title in order:
         rows = buckets[key]; pr = PRIORITY[key]
         h.append(f"<details id='sec-{key}' {'open' if pr in ('hi','mid') and rows else ''}>"
                  f"<summary><span>{_esc(title)}</span>"
-                 f"<span class='badge {pr}'>{len(rows)}</span></summary>")
+                 f"<span class='badge {pr}'>{cnt(key)}</span></summary>")
+        if bc.get(key):
+            h.append(f"<div style='padding:8px 16px;color:var(--muted);font-size:13px'>"
+                     f"+{bc[key]} en transferencias en lote (ver sección al final).</div>")
 
         def _table(rs):
             t = ["<div class=tw><table><tr><th>Check-out</th><th class=amt>Días</th><th>Reserva</th>"
