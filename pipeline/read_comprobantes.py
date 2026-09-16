@@ -22,6 +22,13 @@ Output: out/comprobantes.csv (per reservation) + out/comprobantes_files.csv (per
 """
 from __future__ import annotations
 
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import argparse
 import base64
 import csv

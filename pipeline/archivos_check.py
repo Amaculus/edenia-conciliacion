@@ -24,6 +24,13 @@ Environment:
 """
 from __future__ import annotations
 
+import sys as _sys
+try:
+    _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import argparse
 import csv
 import datetime as dt
