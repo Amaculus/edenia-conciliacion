@@ -72,14 +72,20 @@ def main() -> int:
         # Expected: authoritative reservation total (summary endpoint, present for every
         # reservation), falling back to the receipt-reader's expected.
         expected = money(a.get("total"), a.get("currency")) or (c or {}).get("expected", "")
+        try:
+            total_num = float(a.get("total"))
+        except (TypeError, ValueError):
+            total_num = None
         rec = {"cid": cid, "guest": a.get("guest", ""), "channel": ch,
-               "checkout": a.get("checkout", ""), "dias": dias, "api": api,
+               "checkout": a.get("checkout", ""), "dias": dias, "api": api, "match_flag": mflag,
                "receipt": money((c or {}).get("receipt_amount", ""), (c or {}).get("receipt_currency", "")),
-               "expected": expected,
+               "expected": expected, "_total": total_num, "_currency": (a.get("currency") or "").strip(),
                "detail": (c or {}).get("match_detail", ""), "url": PMS.format(cid=cid)}
         # A real lote = reservations that literally share the same receipt file (same hash).
+        # Bulk members live ONLY in the lote section, never in the per-reservation buckets.
         if c and c.get("bulk_size") not in ("", "1", None) and c.get("receipt_hash"):
             bulk.setdefault(c["receipt_hash"], []).append(rec)
+            continue
 
         collected = api == COLLECTED
         if not collected and has_receipt and mflag in ("OK-MONTO", "OK-BULK"):
@@ -126,10 +132,13 @@ def main() -> int:
 
     shared = {h: v for h, v in bulk.items() if len({r['cid'] for r in v}) > 1}
     if shared:
-        out(f"\nTRANSFERENCIAS EN LOTE (un comprobante cubre varias reservas): {len(shared)}")
+        n_rev = sum(1 for v in shared.values() if v[0].get("match_flag") != "OK-BULK")
+        out(f"\nTRANSFERENCIAS EN LOTE (un comprobante cubre varias reservas): {len(shared)} "
+            f"({n_rev} a revisar)")
         for h, v in shared.items():
-            exp = v[0].get("expected", "-")
-            out(f"  Lote {h}: recibo={v[0]['receipt'] or '-'} vs esperado(suma)={exp} — {len(v)} reservas")
+            ok = v[0].get("match_flag") == "OK-BULK"
+            status = "OK cubre" if ok else "REVISAR no cubre"
+            out(f"  [{status}] Lote {h}: recibo={v[0]['receipt'] or '-'} vs esperado(suma)={lote_suma(v)} — {len(v)} reservas")
             for r in sorted(v, key=lambda x: x["checkout"]):
                 out(f"      {r['cid']} {r['guest'][:24]:24} {r['url']}")
 
@@ -148,6 +157,15 @@ def main() -> int:
 
 def _esc(s: str) -> str:
     return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def lote_suma(members: list[dict]) -> str:
+    """Sum the members' reservation totals per currency for the lote coverage line."""
+    by = {}
+    for r in members:
+        if r.get("_total") is not None and r.get("_currency"):
+            by[r["_currency"]] = by.get(r["_currency"], 0) + r["_total"]
+    return ", ".join(money(a, c) for c, a in by.items()) or "—"
 
 
 PRIORITY = {"cobro_no_registrado": "hi", "chase_directo_agencia": "hi",
@@ -259,12 +277,15 @@ def render_html(buckets, shared, total, order, artifact: bool = False) -> str:
         h.append(_table(rows) + "</details>")
 
     if shared:
-        h.append("<h3 style='margin:20px 0 6px'>Transferencias en lote confirmadas "
-                 "(un comprobante cubre varias reservas)</h3>")
-        for hsh, v in shared.items():
-            exp = v[0].get("expected", "") or "—"
-            h.append(f"<details class=sub open><summary><span>Recibo {_esc(v[0]['receipt'] or '—')} · "
-                     f"esperado(suma) {_esc(exp)}</span><span class='badge mid'>{len(v)}</span></summary><table>"
+        n_rev = sum(1 for v in shared.values() if v[0].get("match_flag") != "OK-BULK")
+        h.append(f"<h3 id='sec-lotes' style='margin:22px 0 6px'>Transferencias en lote "
+                 f"(un comprobante cubre varias reservas) — {n_rev} a revisar</h3>")
+        # Mismatching lotes first (they're the ones to act on).
+        for hsh, v in sorted(shared.items(), key=lambda kv: kv[1][0].get("match_flag") == "OK-BULK"):
+            ok = v[0].get("match_flag") == "OK-BULK"
+            h.append(f"<details class=sub {'open' if not ok else ''}><summary>"
+                     f"<span>Recibo {_esc(v[0]['receipt'] or '—')} · esperado(suma) {_esc(lote_suma(v))} · {len(v)} reservas</span>"
+                     f"<span class='badge {'ok' if ok else 'mid'}'>{'OK cubre' if ok else 'revisar'}</span></summary><table>"
                      "<tr><th>Reserva</th><th>Huésped</th><th>Check-out</th></tr>")
             for r in sorted(v, key=lambda x: x["checkout"]):
                 h.append(f"<tr><td class=cid><a href='{r['url']}' target=_blank>{r['cid']}</a></td>"

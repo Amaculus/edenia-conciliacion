@@ -318,18 +318,34 @@ def classify_file(name: str, path: Path, use_llm: bool = False, skip_images: boo
 
 
 # ---------------------------------------------------------------- veracidad
-def build_expected(targets: list[dict], api_key: str) -> dict[str, dict[str, float]]:
-    """cid -> {currency: expected_amount}, from booking/list rows (reliable), by checkout day."""
-    days = sorted({t.get("checkout") for t in targets if t.get("checkout")})
+def build_expected(targets: list[dict], api_key: str = "") -> dict[str, dict[str, float]]:
+    """cid -> {currency: total}. Prefer the authoritative reservation total that
+    archivos_check wrote to the CSV (summary endpoint); fall back to booking/list rooms."""
     exp: dict[str, dict[str, float]] = {}
-    for day in days:
+    missing = []
+    for t in targets:
+        cid = t.get("cid")
+        cur = (t.get("currency") or "").strip()
         try:
-            for b in ca.fetch_checkouts(api_key, day):
-                bid = str(b.get("booking_id") or b.get("id") or "")
-                if bid:
-                    exp[bid] = ca.room_budgets(b)
-        except Exception:  # noqa: BLE001
-            continue
+            tot = float(t.get("total"))
+        except (TypeError, ValueError):
+            tot = None
+        if cid and cur and tot is not None:
+            exp[cid] = {cur: tot}
+        elif cid:
+            missing.append(t)
+    # Fallback (only for rows without a summary total) via booking/list rooms.
+    if missing and api_key:
+        days = sorted({t.get("checkout") for t in missing if t.get("checkout")})
+        want = {t.get("cid") for t in missing}
+        for day in days:
+            try:
+                for b in ca.fetch_checkouts(api_key, day):
+                    bid = str(b.get("booking_id") or b.get("id") or "")
+                    if bid in want:
+                        exp[bid] = ca.room_budgets(b)
+            except Exception:  # noqa: BLE001
+                continue
     return exp
 
 
