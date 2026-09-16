@@ -66,8 +66,8 @@ def build(s: dict) -> str:
         L.append("*Top:*")
         for r in items[:8]:
             d = f" +{r['dias']}d" if r.get("dias", -1) >= 0 else ""
-            extra = f" — {r['detalle']}" if r.get("detalle") else ""
-            L.append(f"• {r['cid']} {r['guest'][:22]} [{r['channel']}] esperado {r['esperado'] or '-'}{d}{extra[:50]}")
+            rec = f" · recibo {r['recibo']}" if r.get("recibo") else ""
+            L.append(f"• {r['cid']} {r['guest'][:22]} [{r['channel']}] esp {r['esperado'] or '-'}{rec}{d}")
     if s.get("link"):
         L.append("")
         L.append(f"Reporte completo: {s['link']}")
